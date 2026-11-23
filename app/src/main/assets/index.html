@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PS Audio Cutter Pro</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}
+body{margin:0;background:#0b1525;color:#f3f5fb;font-family:system-ui,Segoe UI,sans-serif}
+main{max-width:750px;margin:auto;padding:20px 16px 70px}
+h1{font-size:23px;color:#d5af58;margin:0}h2{font-size:17px;color:#f3f5fb}
+small,.muted{color:#b1bfd2}.head{text-align:center;margin-bottom:20px}
+.card{background:#17263a;border:1px solid #31455f;border-radius:16px;padding:16px;margin:14px 0}
+label{display:block;margin:12px 0 6px;font-weight:600;font-size:14px}
+input,select,button{font:inherit}input[type=file],input[type=number],select{width:100%;background:#243850;color:white;padding:12px;border:1px solid #42607e;border-radius:10px}
+input[type=range]{width:100%;accent-color:#d5af58}
+button{padding:13px 14px;border:0;border-radius:10px;background:#d5af58;color:#101a2b;font-weight:700;margin:6px 0;cursor:pointer;width:100%}
+button.alt{background:#324b69;color:white}button:disabled{opacity:.5}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}canvas{width:100%;height:110px;background:#091322;border-radius:10px}
+progress{width:100%;height:20px;accent-color:#d5af58}.status{min-height:40px;color:#d6e2ee}
+</style></head><body><main>
+<div class="head"><h1>PS AUDIO CUTTER PRO</h1><small>Pepe Simancas Capa · Editor MP3 para Android</small></div>
+<section class="card"><h2>1. Importar audio</h2>
+<input id="file" type="file" accept="audio/*,video/mp4">
+<div class="muted" id="meta">Ningún archivo seleccionado.</div><canvas id="wave"></canvas>
+<button class="alt" id="play">▶ Reproducir selección</button></section>
+<section class="card"><h2>2. Corte manual</h2>
+<div class="grid"><div><label>Inicio (segundos)</label><input id="start" type="number" min="0" step=".1" value="0"></div>
+<div><label>Final (segundos)</label><input id="end" type="number" min=".1" step=".1" value="1"></div></div>
+<label>Inicio del fragmento</label><input id="rangeStart" type="range" min="0" max="1000" value="0">
+<label>Final del fragmento</label><input id="rangeEnd" type="range" min="0" max="1000" value="1000">
+<button id="cut">Exportar corte MP3</button></section>
+<section class="card"><h2>3. División automática</h2>
+<label>Número de partes iguales (2 a 100)</label><input id="parts" type="number" min="2" max="100" value="4">
+<button id="byParts">Dividir en X partes MP3</button>
+<label>Duración por fragmento (segundos)</label><input id="seconds" type="number" min="1" step="1" value="60">
+<button id="byTime">Dividir por tiempo en MP3</button>
+<p class="muted">Los fragmentos se guardarán en un ZIP con archivos MP3 numerados.</p></section>
+<section class="card"><h2>4. Reducir silencios</h2>
+<label>Umbral de silencio (dBFS)</label><select id="threshold">
+<option value="-40">Conservador · -40 dB</option><option value="-35">Normal · -35 dB</option><option value="-28">Agresivo · -28 dB</option></select>
+<label>Silencio mínimo (segundos)</label><input id="minimum" type="number" min=".15" max="5" step=".05" value=".6">
+<button id="clean">Eliminar pausas largas y exportar MP3</button></section>
+<section class="card"><h2>5. Exportación</h2>
+<label>Calidad MP3</label><select id="bitrate"><option value="128">128 kbps</option><option value="192" selected>192 kbps</option><option value="256">256 kbps</option></select>
+<progress id="progress" max="100" value="0"></progress><div id="status" class="status">Importa un archivo para comenzar.</div>
+<small>El procesamiento se realiza en el dispositivo. El archivo original permanece intacto.</small>
+</section>
+</main>
+<script src="./lame.min.js"></script>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+let ctx,src,baseName='audio',playing=null,working=false;
+const note=x=>{$('status').textContent=x};
+const sleep=()=>new Promise(r=>setTimeout(r,0));
+function duration(){return src?src.duration:0}
+function stop(){try{playing&&playing.stop()}catch(e){}playing=null}
+$('file').onchange=async e=>{
+  const file=e.target.files[0];if(!file)return;
+  if(working)return;
+  try{
+    stop();ctx=ctx||new(window.AudioContext||window.webkitAudioContext)();
+    const bytes=await file.arrayBuffer();
+    src=await ctx.decodeAudioData(bytes);
+    baseName=(file.name.replace(/\.[^.]+$/,'').replace(/[^\w\-áéíóúñ]/gi,'_')||'audio').slice(0,60);
+    $('start').value=0;$('end').value=src.duration.toFixed(2);
+    $('meta').textContent=file.name+' · '+src.duration.toFixed(1)+' segundos · '+src.numberOfChannels+' canal(es)';
+    note('Archivo importado. Marca el fragmento o selecciona una división.');draw();
+  }catch(err){note('No se pudo decodificar este audio: '+err.message)}
+};
+function draw(){
+  const c=$('wave'),w=Math.max(300,c.clientWidth),h=110,ratio=devicePixelRatio||1;
+  c.width=w*ratio;c.height=h*ratio;
+  const g=c.getContext('2d');g.scale(ratio,ratio);g.clearRect(0,0,w,h);
+  if(!src)return;let samples=src.getChannelData(0),step=Math.max(1,Math.floor(samples.length/w));
+  g.fillStyle='#d5af58';
+  for(let x=0;x<w;x++){let peak=0,a=x*step,b=Math.min(a+step,samples.length);
+    for(let i=a;i<b;i+=Math.max(1,Math.floor(step/45)))peak=Math.max(peak,Math.abs(samples[i]));
+    let ph=Math.max(1,peak*h*.45);g.fillRect(x,h/2-ph,2,ph*2);
+  }
+}
+function sync(fromRange){
+  if(!src)return;
+  if(fromRange){$('start').value=(duration()*$('rangeStart').value/1000).toFixed(2);
+    $('end').value=(duration()*$('rangeEnd').value/1000).toFixed(2)}
+  else {$('rangeStart').value=Math.round(1000*Number($('start').value)/duration());
+        $('rangeEnd').value=Math.round(1000*Number($('end').value)/duration())}
+}
+['rangeStart','rangeEnd'].forEach(id=>$(id).oninput=()=>sync(true));
+['start','end'].forEach(id=>$(id).oninput=()=>sync(false));
+$('play').onclick=async()=>{
+  if(!src)return note('Importa un archivo primero.');
+  try{stop();await ctx.resume();
+  let a=Number($('start').value),b=Number($('end').value);
+  if(!(a>=0&&b>a&&b<=duration()+.01))throw Error('Selecciona inicio y final válidos.');
+  playing=ctx.createBufferSource();playing.buffer=src;playing.connect(ctx.destination);
+  playing.start(0,a,b-a);playing.onended=()=>playing=null;
+  }catch(e){note(e.message)}
+};
+function assert(){if(!src)throw Error('Importa un audio.');if(typeof lamejs==='undefined')throw Error('Codificador MP3 no incluido en el APK.')}
+function pcmAt(buffer,channel,a,b){let data=buffer.getChannelData(Math.min(channel,buffer.numberOfChannels-1));
+  const out=new Int16Array(b-a);
+  for(let i=a;i<b;i++){let v=Math.min(1,Math.max(-1,data[i]));out[i-a]=v<0?v*32768:v*32767}
+  return out;
+}
+async function encode(a,b,buffer=src){
+  let sr=buffer.sampleRate,first=Math.max(0,Math.floor(a*sr)),last=Math.min(buffer.length,Math.ceil(b*sr));
+  if(last<=first)throw Error('Fragmento vacío');
+  const channels=Math.min(2,buffer.numberOfChannels),kbps=Number($('bitrate').value);
+  const encoder=new lamejs.Mp3Encoder(channels,sr,kbps),chunks=[],frame=1152;
+  for(let i=first;i<last;i+=frame){
+    const k=Math.min(i+frame,last),left=pcmAt(buffer,0,i,k);
+    const encoded=channels===2?encoder.encodeBuffer(left,pcmAt(buffer,1,i,k)):encoder.encodeBuffer(left);
+    if(encoded.length)chunks.push(new Uint8Array(encoded));
+    if((i-first)%(frame*160)===0){$('progress').value=Math.round((i-first)/(last-first)*100);await sleep()}
+  }
+  const tail=encoder.flush();if(tail.length)chunks.push(new Uint8Array(tail));
+  return new Blob(chunks,{type:'audio/mpeg'});
+}
+async function save(blob,name){
+  const bytes=new Uint8Array(await blob.arrayBuffer());
+  if(typeof AndroidBridge==='undefined')throw Error('Esta edición requiere la aplicación Android instalada.');
+  if(!AndroidBridge.beginFile(name,name.endsWith('.zip')?'application/zip':'audio/mpeg'))throw Error('No se pudo abrir Descargas.');
+  try{
+    for(let i=0;i<bytes.length;i+=24576){
+      let chunk=bytes.subarray(i,i+24576),str='';
+      for(let j=0;j<chunk.length;j++)str+=String.fromCharCode(chunk[j]);
+      if(!AndroidBridge.appendChunk(btoa(str)))throw Error('Falló el guardado en Android');
+      await sleep();
+    }
+    if(!AndroidBridge.finishFile())throw Error('No se pudo cerrar el archivo');
+  }catch(e){AndroidBridge.cancelFile();throw e}
+}
+async function task(fn){
+  if(working)return;working=true;$('progress').value=0;
+  try{assert();await fn();$('progress').value=100;note('Archivo guardado correctamente en Descargas/PS Audio Cutter.')}
+  catch(e){note('Error: '+e.message)}
+  finally{working=false}
+}
+$('cut').onclick=()=>task(async()=>{
+  let a=Number($('start').value),b=Number($('end').value);
+  if(!(a>=0&&b>a&&b<=duration()+.01))throw Error('Inicio/final incorrectos');
+  note('Codificando fragmento MP3…');await save(await encode(a,b),baseName+'_corte.mp3');
+});
+const crcTable=(()=>{let t=new Uint32Array(256);for(let n=0;n<256;n++){let c=n;for(let j=0;j<8;j++)c=(c&1)?0xedb88320^(c>>>1):c>>>1;t[n]=c>>>0}return t})();
+function crc32(data){let c=0xffffffff;for(let b of data)c=crcTable[(c^b)&255]^(c>>>8);return (c^0xffffffff)>>>0}
+function zipFiles(items){
+  const encoder=new TextEncoder(),pieces=[],directory=[];let pos=0;
+  for(let {name,bytes} of items){
+    let fname=encoder.encode(name),crc=crc32(bytes),a=new Uint8Array(30+fname.length),v=new DataView(a.buffer);
+    v.setUint32(0,0x04034b50,true);v.setUint16(4,20,true);v.setUint32(14,crc,true);v.setUint32(18,bytes.length,true);v.setUint32(22,bytes.length,true);v.setUint16(26,fname.length,true);a.set(fname,30);
+    pieces.push(a,bytes);
+    let d=new Uint8Array(46+fname.length),dv=new DataView(d.buffer);
+    dv.setUint32(0,0x02014b50,true);dv.setUint16(4,20,true);dv.setUint16(6,20,true);
+    dv.setUint32(16,crc,true);dv.setUint32(20,bytes.length,true);dv.setUint32(24,bytes.length,true);dv.setUint16(28,fname.length,true);dv.setUint32(42,pos,true);d.set(fname,46);directory.push(d);pos+=a.length+bytes.length;
+  }
+  let centralSize=directory.reduce((n,x)=>n+x.length,0),end=new Uint8Array(22),v=new DataView(end.buffer);
+  v.setUint32(0,0x06054b50,true);v.setUint16(8,items.length,true);v.setUint16(10,items.length,true);v.setUint32(12,centralSize,true);v.setUint32(16,pos,true);
+  return new Blob([...pieces,...directory,end],{type:'application/zip'});
+}
+async function split(kind){await task(async()=>{
+  let span=kind==='parts'?duration()/Number($('parts').value):Number($('seconds').value);
+  let n=Math.ceil(duration()/span);
+  if(!(span>0&&n>=1&&n<=100))throw Error('Introduce un número válido de partes (máximo 100).');
+  let items=[];
+  for(let i=0;i<n;i++){
+    let a=i*span,b=Math.min(duration(),(i+1)*span);
+    note('Codificando parte '+(i+1)+' de '+n);
+    let blob=await encode(a,b),bytes=new Uint8Array(await blob.arrayBuffer());
+    items.push({name:baseName+'_parte_'+String(i+1).padStart(3,'0')+'.mp3',bytes});
+    $('progress').value=Math.round((i+1)/n*100);
+    await sleep();
+  }
+  await save(zipFiles(items),baseName+'_'+n+'_partes_mp3.zip');
+})}
+$('byParts').onclick=()=>split('parts');$('byTime').onclick=()=>split('time');
+$('clean').onclick=()=>task(async()=>{
+  const sr=src.sampleRate,hop=Math.round(sr*.02),threshold=Math.pow(10,Number($('threshold').value)/20);
+  const minFrames=Math.max(1,Math.round(Number($('minimum').value)/.02)),active=[];
+  for(let i=0;i<src.length;i+=hop){
+    let sum=0,n=0;
+    for(let j=i;j<Math.min(i+hop,src.length);j+=Math.max(1,Math.floor(hop/25))){
+      for(let ch=0;ch<Math.min(2,src.numberOfChannels);ch++){let v=src.getChannelData(ch)[j];sum+=v*v;n++}
+    }
+    active.push(Math.sqrt(sum/Math.max(1,n))>threshold);
+  }
+  let keep=active.slice();
+  for(let i=0;i<active.length;){
+    if(active[i]){i++;continue}
+    let j=i;while(j<active.length&&!active[j])j++;
+    if(j-i>=minFrames){for(let k=i+5;k<j-5;k++)keep[k]=false}
+    else for(let k=i;k<j;k++)keep[k]=true;
+    i=j;
+  }
+  let ranges=[],length=0;
+  for(let i=0;i<keep.length;i++)if(keep[i]){let a=i*hop,b=Math.min(src.length,a+hop);ranges.push([a,b]);length+=b-a}
+  if(length<sr*.05)throw Error('No se detectó voz suficiente. Ajusta sensibilidad.');
+  const result=ctx.createBuffer(Math.min(2,src.numberOfChannels),length,sr);
+  for(let ch=0;ch<result.numberOfChannels;ch++){
+    let dest=result.getChannelData(ch),raw=src.getChannelData(ch),pos=0;
+    for(let [a,b] of ranges){dest.set(raw.subarray(a,b),pos);pos+=b-a}
+  }
+  note('Codificando audio sin pausas largas…');
+  await save(await encode(0,result.duration,result),baseName+'_sin_silencios.mp3');
+});
+</script></body></html>

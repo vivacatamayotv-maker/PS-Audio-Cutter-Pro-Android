@@ -1,0 +1,66 @@
+name: Compilar PS Audio Cutter APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compilar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Descargar proyecto
+        uses: actions/checkout@v4
+      - name: Preparar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Preparar Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+      - name: Preparar Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Incluir codificador MP3 offline
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 --silent --show-error \
+            https://raw.githubusercontent.com/zhuker/lamejs/master/lame.min.js \
+            -o app/src/main/assets/lame.min.js
+          test "$(wc -c < app/src/main/assets/lame.min.js)" -gt 100000
+      - name: Compilar Kotlin y generar APK
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle :app:assembleDebug --no-daemon --console=plain --stacktrace 2>&1 | tee build.log
+      - name: Resumir errores
+        if: failure()
+        shell: bash
+        run: |
+          echo "## Errores de compilación" >> "$GITHUB_STEP_SUMMARY"
+          echo '~~~text' >> "$GITHUB_STEP_SUMMARY"
+          (grep -nEi '^e:|error:|FAILURE:|What went wrong:|Unresolved reference|Could not (find|resolve)|Execution failed for task' build.log | head -50 || true) >> "$GITHUB_STEP_SUMMARY"
+          echo '~~~' >> "$GITHUB_STEP_SUMMARY"
+      - name: Guardar registro
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS-Audio-Cutter-Registro
+          path: build.log
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Publicar APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS-Audio-Cutter-Pro-APK
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
